@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Leitor NF-e</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #111; color: #fff; padding: 1.5rem 1rem; }
+    h1 { font-size: 1.2rem; font-weight: 500; margin-bottom: 1.5rem; text-align: center; }
+
+    #video-wrap { position: relative; width: 100%; max-width: 420px; margin: 0 auto; }
+    #video { width: 100%; border-radius: 12px; display: block; background: #000; }
+    #scan-frame {
+      position: absolute; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      width: 60%; aspect-ratio: 1; pointer-events: none;
+    }
+    .corner { position: absolute; width: 24px; height: 24px; border-color: #4ADE80; border-style: solid; }
+    .corner.tl { top:0; left:0; border-width:3px 0 0 3px; border-radius:4px 0 0 0; }
+    .corner.tr { top:0; right:0; border-width:3px 3px 0 0; border-radius:0 4px 0 0; }
+    .corner.bl { bottom:0; left:0; border-width:0 0 3px 3px; border-radius:0 0 0 4px; }
+    .corner.br { bottom:0; right:0; border-width:0 3px 3px 0; border-radius:0 0 4px 0; }
+    #scan-line {
+      position: absolute; left:10%; right:10%; height:2px;
+      background: linear-gradient(90deg, transparent, #4ADE80, transparent);
+      animation: scan 2s ease-in-out infinite;
+    }
+    @keyframes scan { 0%,100%{top:10%} 50%{top:86%} }
+
+    #status { text-align:center; font-size:0.85rem; color:#aaa; margin:0.8rem 0; min-height:1.2rem; }
+
+    #config-ip {
+      max-width:420px; margin:0 auto 1rem; display:flex; gap:8px; align-items:center;
+    }
+    #config-ip input {
+      flex:1; padding:8px 10px; border-radius:7px; border:1px solid #444;
+      background:#1a1a1a; color:#fff; font-size:0.85rem;
+    }
+    #config-ip button {
+      padding:8px 14px; border-radius:7px; border:1px solid #4ADE80;
+      background:none; color:#4ADE80; font-size:0.85rem; cursor:pointer; white-space:nowrap;
+    }
+
+    #start-btn {
+      display:block; margin:0 auto 1rem; padding:10px 28px;
+      background:none; border:1px solid #555; border-radius:8px;
+      color:#fff; font-size:0.95rem; cursor:pointer;
+    }
+    #start-btn:hover { background:#222; }
+
+    #tabela-wrap { max-width:700px; margin:1.5rem auto 0; overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+    thead tr { background:#1a1a1a; }
+    th { padding:10px 12px; text-align:left; color:#aaa; font-weight:500; border-bottom:1px solid #333; white-space:nowrap; }
+    td { padding:9px 12px; border-bottom:1px solid #222; color:#eee; }
+    tbody tr:hover { background:#1a1a1a; }
+
+    #acoes { display:flex; gap:10px; justify-content:flex-end; max-width:700px; margin:0.75rem auto 0; }
+    .btn-acao {
+      padding:7px 16px; font-size:0.82rem; border-radius:7px; cursor:pointer;
+      border:1px solid #444; background:none; color:#ccc;
+    }
+    .btn-acao:hover { background:#222; }
+    .btn-acao.primary { border-color:#4ADE80; color:#4ADE80; }
+    .btn-acao.danger  { border-color:#f87171; color:#f87171; }
+
+    .carregando { color:#facc15; font-size:0.75rem; }
+  </style>
+</head>
+<body>
+
+<h1>🧾 Leitor NF-e → Planilha</h1>
+
+<div id="config-ip">
+  <input id="ip-input" type="text" placeholder="IP do servidor, ex: 192.168.1.10:3000"/>
+  <button onclick="salvarIP()">Salvar</button>
+</div>
+
+<div id="video-wrap" style="display:none">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="canvas" style="display:none"></canvas>
+  <div id="scan-frame">
+    <div class="corner tl"></div><div class="corner tr"></div>
+    <div class="corner bl"></div><div class="corner br"></div>
+    <div id="scan-line"></div>
+  </div>
+</div>
+
+<p id="status">Configure o IP do servidor acima e ative a câmera</p>
+<button id="start-btn" onclick="startCamera()">Ativar câmera</button>
+
+<div id="tabela-wrap">
+  <div id="acoes" style="display:none">
+    <button class="btn-acao danger" onclick="limparTabela()">Limpar tudo</button>
+    <button class="btn-acao primary" onclick="exportarCSV()">⬇ Exportar CSV</button>
+  </div>
+  <table id="tabela">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Data da Compra</th>
+        <th>Valor da Compra</th>
+        <th>Estabelecimento</th>
+      </tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script>
+  const video  = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+  const tbody  = document.getElementById('tbody');
+
+  let serverIP = localStorage.getItem('server_ip') || '';
+  if (serverIP) document.getElementById('ip-input').value = serverIP;
+
+  let notas = JSON.parse(localStorage.getItem('notas_nfe') || '[]');
+  let lidas = new Set(notas.map(n => n.chave));
+  let processando = false;
+  renderTabela();
+
+  function salvarIP() {
+    serverIP = document.getElementById('ip-input').value.trim();
+    localStorage.setItem('server_ip', serverIP);
+    setStatus('✅ IP salvo: ' + serverIP);
+  }
+
+  function setStatus(msg) {
+    document.getElementById('status').textContent = msg;
+  }
+
+  async function startCamera() {
+    if (!serverIP) { setStatus('⚠️ Configure o IP do servidor primeiro!'); return; }
+    document.getElementById('start-btn').style.display = 'none';
+    setStatus('Acessando câmera...');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+      video.srcObject = stream;
+      video.play();
+      document.getElementById('video-wrap').style.display = 'block';
+      setStatus('Aponte para o QR Code da NF-e');
+      scanLoop();
+    } catch(e) {
+      setStatus('Permissão negada ou câmera indisponível.');
+      document.getElementById('start-btn').style.display = 'block';
+    }
+  }
+
+  function scanLoop() {
+    requestAnimationFrame(scanLoop);
+    if (video.readyState !== video.HAVE_ENOUGH_DATA || processando) return;
+    canvas.width  = video.videoWidth;
+    canvas.height = video.videoHeight;
+    ctx.drawImage(video, 0, 0);
+    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    if (code && code.data) processarQR(code.data);
+  }
+
+  async function processarQR(qrUrl) {
+    // Extrai chave da URL
+    let urlCompleta = qrUrl;
+    let chave = '';
+    try {
+      const u = new URL(qrUrl);
+      const p = u.searchParams.get('p') || '';
+      chave = p.split('|')[0];
+    } catch(e) {
+      const m = qrUrl.match(/[?&]p=([^&|]+)/);
+      if (m) chave = m[1];
+    }
+    if (!chave || chave.length < 44) return;
+    if (lidas.has(chave)) { setStatus('⚠️ Nota já registrada!'); return; }
+
+    processando = true;
+    setStatus('⏳ Consultando nota fiscal...');
+
+    // Extrai data da chave: posição 2-7 = AAMM → usa o dia 01 como base
+    const ano = '20' + chave.substring(2, 4);
+    const mes = chave.substring(4, 6);
+    // Tenta pegar dia do parâmetro offline ou usa 01
+    let dia = '01';
+    try {
+      const u = new URL(qrUrl);
+      const p = u.searchParams.get('p') || '';
+      const partes = p.split('|');
+      // versão offline tem o dia no índice 3
+      if (partes.length >= 4 && /^\d{2}$/.test(partes[3])) dia = partes[3];
+    } catch(e) {}
+
+    const data = `${dia}/${mes}/${ano}`;
+
+    // Consulta o servidor proxy
+    let nome  = 'Não encontrado';
+    let valor = 'Não encontrado';
+    try {
+      const resp = await fetch(`http://${serverIP}/consulta?url=${encodeURIComponent(urlCompleta)}`);
+      const json = await resp.json();
+      if (json.nome)  nome  = json.nome;
+      if (json.valor) valor = 'R$ ' + parseFloat(json.valor).toFixed(2).replace('.', ',');
+    } catch(e) {
+      setStatus('❌ Erro ao consultar servidor. Verifique o IP.');
+      processando = false;
+      return;
+    }
+
+    const nota = { chave, data, valor, nome };
+    notas.push(nota);
+    lidas.add(chave);
+    localStorage.setItem('notas_nfe', JSON.stringify(notas));
+    renderTabela();
+    setStatus(`✅ Nota adicionada: ${nome}`);
+    processando = false;
+  }
+
+  function renderTabela() {
+    if (notas.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#555;padding:2rem 0">Nenhuma nota lida ainda.</td></tr>';
+      document.getElementById('acoes').style.display = 'none';
+      return;
+    }
+    document.getElementById('acoes').style.display = 'flex';
+    tbody.innerHTML = notas.map((n, i) => `
+      <tr>
+        <td>${i + 1}</td>
+        <td>${n.data}</td>
+        <td>${n.valor}</td>
+        <td>${n.nome}</td>
+      </tr>
+    `).join('');
+  }
+
+  function exportarCSV() {
+    const header = 'Nº,Data da Compra,Valor da Compra,Estabelecimento\n';
+    const linhas = notas.map((n, i) =>
+      `${i+1},"${n.data}","${n.valor}","${n.nome}"`
+    ).join('\n');
+    const blob = new Blob(['\uFEFF' + header + linhas], { type: 'text/csv;charset=utf-8;' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `compras_${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+  }
+
+  function limparTabela() {
+    if (!confirm('Apagar todas as notas?')) return;
+    notas = []; lidas = new Set();
+    localStorage.removeItem('notas_nfe');
+    renderTabela();
+  }
+</script>
+</body>
+</html>
